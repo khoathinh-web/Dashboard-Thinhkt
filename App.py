@@ -1142,8 +1142,8 @@ with f2:
 with f3:
     st.markdown('<p class="filter-label">KPI NAME</p>', unsafe_allow_html=True)
     kpi_map = {
-        "1. ASO FOCUS TOTAL NHÃN CHANTÉ": "CHANTE",
-        "2. ASO FOCUS TRẬN VÀNG - OMACHI TRỘN": "OMACHI",
+        "1. ASO FOCUS TRẬN XANH - TEA365": "TEA365",
+        "2. ASO FOCUS TRẬN VÀNG - HOMEY ĐỎ": "HOMEY",
         "3. ASO TEA KÊNH ON PREMISE": "ASO_TEA",
         "4. PC BT KÊNH OFF (ĐƠN ≥ 4 LINE - LOẠI BEER)": "PC_BT",
         "5. ASO ALL KÊNH OFF": "ASO_ALL",
