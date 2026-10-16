@@ -1258,16 +1258,38 @@ def process_cat_sales(df_rpt, df_cat):
 
 
 def process_brand_sales(df_rpt, df_brand):
-  if df_brand.empty or df_rpt.empty:
-    return df_brand
+  if df_brand is None or df_brand.empty or df_rpt is None or df_rpt.empty:
+    return df_brand if df_brand is not None else pd.DataFrame()
 
+  # Tìm cột danh sách brand linh hoạt
   c_brand_col = [
       c
       for c in df_brand.columns
-      if 'brand' in c.lower() and 'danh sách' in c.lower()
+      if 'brand' in str(c).lower() and ('danh sách' in str(c).lower() or 'danh sach' in str(c).lower() or 'full' in str(c).lower())
   ]
-  brand_col_name = c_brand_col[0] if c_brand_col else 'Danh sách full brand'
+  if not c_brand_col:
+    c_brand_col = [
+        c for c in df_brand.columns
+        if str(c).strip().lower() in (
+            'danh sách full brand', 'danh sach full brand', 'brand', 'nhãn', 'nhãn hàng', 'ten brand'
+        )
+    ]
+  if not c_brand_col:
+    # fallback: cột đầu tiên không phải mã/code
+    for c in df_brand.columns:
+      cl = str(c).lower()
+      if 'mã' in cl or 'code' in cl or 'stt' in cl:
+        continue
+      c_brand_col = [c]
+      break
+  if not c_brand_col:
+    return df_brand
+  brand_col_name = c_brand_col[0]
+  if brand_col_name not in df_brand.columns:
+    return df_brand
   brands_list = df_brand[brand_col_name].dropna().unique().tolist()
+  if not brands_list:
+    return df_brand
 
   def match_brand(sku_str):
     if pd.isna(sku_str):
