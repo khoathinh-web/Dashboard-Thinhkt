@@ -12976,10 +12976,12 @@ def render_hs_daily_metric_cards(df_perf, report_date, lppc_moc=4.3, aso_off=Non
   th_cn, ct_cn = g('TH Combo ON'), g('CT Combo ON') or 3
 
   # ASO ALL OFF/ON — TH ngày; CT ngày = MCP tháng / số ngày làm việc
-  ao = aso_off or {'th': 0, 'ct': 0, 'ct_day': 0}
-  an = aso_on or {'th': 0, 'ct': 0, 'ct_day': 0}
+  ao = aso_off or {'th': 0, 'mtd': 0, 'ct': 0, 'ct_day': 0}
+  an = aso_on or {'th': 0, 'mtd': 0, 'ct': 0, 'ct_day': 0}
   ao_th = int(ao.get('th', 0) or 0)
   an_th = int(an.get('th', 0) or 0)
+  ao_mtd = int(ao.get('mtd', 0) or 0)
+  an_mtd = int(an.get('mtd', 0) or 0)
   ao_ct = int(ao.get('ct_day', 0) or ao.get('ct', 0) or 0)
   an_ct = int(an.get('ct_day', 0) or an.get('ct', 0) or 0)
 
@@ -12989,8 +12991,18 @@ def render_hs_daily_metric_cards(df_perf, report_date, lppc_moc=4.3, aso_off=Non
     ('PC BT / PC OFF', f'{int(pc_off)}/{int(plan_off)} CALLS', f'Tỷ lệ chốt đơn {pct_pc_off:.0f}%', '#3182ce'),
     ('PC ON', f'{int(pc_on)}/{int(plan_on)} CALLS', f'Tỷ lệ chốt đơn {pct_pc_on:.0f}%', '#dd6b20'),
     ('LPPC OFF', f'{lppc:.2f}'.replace('.', ','), f'Target {lppc_moc} · {"vượt" if lppc >= lppc_moc else "chưa đạt"}', '#38a169'),
-    ('ASO ALL OFF', f'{ao_th}/{ao_ct}' if ao_ct else f'{ao_th}', f'Đạt {ao_th/ao_ct*100:.0f}%' if ao_ct else '—', '#805ad5'),
-    ('ASO ALL ON', f'{an_th}/{an_ct}' if an_ct else f'{an_th}', f'Đạt {an_th/an_ct*100:.0f}%' if an_ct else '—', '#d53f8c'),
+    (
+      'ASO ALL OFF',
+      f'{ao_th}/{ao_mtd}/{ao_ct}',
+      f'TH ngày/MTD/CT · Đạt {ao_mtd/ao_ct*100:.0f}%' if ao_ct else 'TH ngày/MTD/CT',
+      '#805ad5',
+    ),
+    (
+      'ASO ALL ON',
+      f'{an_th}/{an_mtd}/{an_ct}',
+      f'TH ngày/MTD/CT · Đạt {an_mtd/an_ct*100:.0f}%' if an_ct else 'TH ngày/MTD/CT',
+      '#d53f8c',
+    ),
     ('ASO TRẬN XANH', f'{int(th_x)}/{int(ct_x)}', f'Đạt {th_x/ct_x*100:.0f}%' if ct_x else '0%', '#319795'),
     ('ASO TRẬN VÀNG', f'{int(th_v)}/{int(ct_v)}', f'Đạt {th_v/ct_v*100:.0f}%' if ct_v else '0%', '#d69e2e'),
     ('COMBO OFF', f'{int(th_co)}/{int(ct_co)} suất', f'Đạt {th_co/ct_co*100:.0f}%' if ct_co else '0%', '#2b6cb0'),
@@ -14946,38 +14958,125 @@ with tab_kpi:
             _moc = float(get_month_cfg().get('lppc_moc', 4.3) or 4.3)
           except Exception:
             _moc = 4.3
-          # ASO ALL OFF/ON: TH = CH có đơn trong ngày; CT ngày = MCP kênh / số ngày LV
-          _aso_off, _aso_on = {'th': 0, 'ct': 0, 'ct_day': 0}, {'th': 0, 'ct': 0, 'ct_day': 0}
+          # ASO ALL OFF/ON ngày:
+          # TH = CH first-buy đúng ngày BC (logic ASO ALL)
+          # CT = CH có lịch VT ngày đang chọn (theo kênh)
+          # MTD = trong các CH thuộc lịch VT ngày đó, bao nhiêu CH đã có đơn từ đầu tháng → ngày BC
+          _aso_off, _aso_on = {'th': 0, 'mtd': 0, 'ct': 0, 'ct_day': 0}, {'th': 0, 'mtd': 0, 'ct': 0, 'ct_day': 0}
           try:
             _rd0 = report_date if isinstance(report_date, date) else pd.Timestamp(report_date).date()
-            _wd0, _, _, _ = get_timegone_stats(_rd0)
-            _wd0 = max(int(_wd0 or 1), 1)
-            _day = df[df['date'] == _rd0].copy() if df is not None and not df.empty and 'date' in df.columns else pd.DataFrame()
-            if nv_selected(filter_nv) and not _day.empty:
-              _day = filter_df_by_nv(_day, 'Tên NVBH', filter_nv)
-            if not _day.empty and 'Mã CH' in _day.columns:
-              _l1 = _day['L1'].astype(str) if 'L1' in _day.columns else pd.Series('', index=_day.index)
-              _off = _day[_l1.str.contains('Off', case=False, na=False)]
-              _on = _day[_l1.str.contains('On', case=False, na=False)]
-              _aso_off['th'] = int(_off['Mã CH'].nunique()) if not _off.empty else 0
-              _aso_on['th'] = int(_on['Mã CH'].nunique()) if not _on.empty else 0
+            _mstart = date(_rd0.year, _rd0.month, 1)
+
+            def _thu_codes_for_date(d0):
+              wd = d0.weekday()  # Mon=0
+              code = str(wd + 2) if wd < 6 else 'CN'  # Mon=2 ... Sat=7
+              cycles = {code}
+              if code in ('2', '5'):
+                cycles.add('25')
+              if code in ('3', '6'):
+                cycles.add('36')
+              if code in ('4', '7'):
+                cycles.add('47')
+              return cycles
+
+            _codes = _thu_codes_for_date(_rd0)
+
+            def _nma(x):
+              if pd.isna(x):
+                return ''
+              s = str(x).strip()
+              if s.endswith('.0'):
+                s = s[:-2]
+              try:
+                return str(int(float(s)))
+              except Exception:
+                return s
+
+            # --- CT + tập CH lịch VT ngày (OFF/ON) từ MCP ---
+            _route_off, _route_on = set(), set()
             if mcp is not None and not mcp.empty:
               c_ch = find_col(mcp, ['Outlet_code', 'Outlet Code', 'Mã CH'])
               c_l1 = find_col(mcp, ['L1', 'Loại hình', 'Kênh'])
               c_nv = find_col(mcp, ['SM Name', 'SM name', 'Tên NVBH', 'Nhân viên'])
+              c_thu = find_col(mcp, [
+                  'Thứ', 'Thu', 'Visit day', 'Ngày VT', 'F', 'Frequency',
+                  'Tần suất', 'Chu kỳ', 'Visit Day',
+              ])
               _m = mcp
               if nv_selected(filter_nv) and c_nv:
                 _m = filter_df_by_nv(mcp, c_nv, filter_nv)
-              if c_ch and c_l1 and not _m.empty:
-                _ml1 = _m[c_l1].astype(str)
-                _ct_off = int(_m.loc[_ml1.str.contains('Off', case=False, na=False), c_ch].nunique())
-                _ct_on = int(_m.loc[_ml1.str.contains('On', case=False, na=False), c_ch].nunique())
-                _aso_off['ct'] = _ct_off
-                _aso_on['ct'] = _ct_on
-                _aso_off['ct_day'] = max(1, int(round(_ct_off / _wd0)))
-                _aso_on['ct_day'] = max(1, int(round(_ct_on / _wd0)))
+              if c_ch and not _m.empty:
+                if c_thu:
+                  _thu = _m[c_thu].astype(str).str.strip()
+                  _on_day = _thu.isin(_codes) | _thu.apply(
+                      lambda x: any(c in str(x) for c in _codes if c != 'CN')
+                  )
+                  _mday = _m[_on_day]
+                else:
+                  _mday = _m
+                if c_l1 and not _mday.empty:
+                  _ml1 = _mday[c_l1].astype(str)
+                  _route_off = set(
+                      _mday.loc[_ml1.str.contains('Off', case=False, na=False), c_ch].map(_nma)
+                  )
+                  _route_on = set(
+                      _mday.loc[_ml1.str.contains('On', case=False, na=False), c_ch].map(_nma)
+                  )
+                else:
+                  _route_off = set(_mday[c_ch].map(_nma))
+                _route_off.discard('')
+                _route_on.discard('')
+
+            # fallback CT từ Plan VT dòng TOTAL nếu MCP không ra
+            if not _route_off or not _route_on:
+              try:
+                _tot = df_perf.iloc[-1]
+                if not _route_off:
+                  _aso_off['ct_day'] = int(round(float(_tot.get('Plan VT OFF', 0) or 0)))
+                if not _route_on:
+                  _aso_on['ct_day'] = int(round(float(_tot.get('Plan VT ON', 0) or 0)))
+              except Exception:
+                pass
+            if _route_off:
+              _aso_off['ct_day'] = len(_route_off)
+            if _route_on:
+              _aso_on['ct_day'] = len(_route_on)
+            _aso_off['ct'] = _aso_off['ct_day']
+            _aso_on['ct'] = _aso_on['ct_day']
+
+            # --- TH + MTD từ RPT ---
+            if df is not None and not df.empty and 'date' in df.columns and 'Mã CH' in df.columns:
+              _mtd = df[(df['date'] >= _mstart) & (df['date'] <= _rd0)].copy()
+              if nv_selected(filter_nv) and not _mtd.empty and 'Tên NVBH' in _mtd.columns:
+                _mtd = filter_df_by_nv(_mtd, 'Tên NVBH', filter_nv)
+              if not _mtd.empty:
+                _mtd['_ma'] = _mtd['Mã CH'].map(_nma)
+                _l1 = _mtd['L1'].astype(str) if 'L1' in _mtd.columns else pd.Series('', index=_mtd.index)
+                for _key, _mask, _route in (
+                    ('off', _l1.str.contains('Off', case=False, na=False), _route_off),
+                    ('on', _l1.str.contains('On', case=False, na=False), _route_on),
+                ):
+                  _sub = _mtd[_mask]
+                  if _sub.empty:
+                    continue
+                  # TH ngày: first-buy đúng ngày BC
+                  _first = _sub.groupby('_ma')['date'].min()
+                  _th = int((_first == _rd0).sum())
+                  # MTD: CH thuộc lịch VT ngày đang chọn đã có đơn trong tháng
+                  if _route:
+                    _mtd_n = int(_sub[_sub['_ma'].isin(_route)]['_ma'].nunique())
+                  else:
+                    # fallback: toàn bộ CH kênh (hiếm khi MCP thiếu lịch)
+                    _mtd_n = int(_sub['_ma'].nunique())
+                  if _key == 'off':
+                    _aso_off['th'] = _th
+                    _aso_off['mtd'] = _mtd_n
+                  else:
+                    _aso_on['th'] = _th
+                    _aso_on['mtd'] = _mtd_n
           except Exception:
             pass
+
           st.markdown(
               render_hs_daily_metric_cards(
                   df_perf, report_date, lppc_moc=_moc,
