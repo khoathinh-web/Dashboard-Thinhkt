@@ -849,11 +849,13 @@ def get_turnover_targets_by_name():
       if pd.isna(tgt):
         continue
       name = ' '.join(str(r.get('SM name', '')).strip().split())
-      if not name:
+      if not name or name.lower() in ('nan', 'none'):
         continue
-      # giữ max nếu trùng tên
-      out[name] = max(float(tgt), float(out.get(name, 0) or 0))
-      out[name.lower()] = out[name]
+      val = float(tgt)
+      prev = float(out.get(name, 0) or 0)
+      if val >= prev:
+        out[name] = val
+        out[name.lower()] = val
     return out
   except Exception:
     return {}
@@ -9891,12 +9893,14 @@ def build_perf_by_month(df_raw, filter_nv=None, n_months=4, df_rpt=None, report_
           # Target_KPI = VND → triệu
           to_total_m = float(to_total) / 1_000_000.0
           _ratio = to_total_m / sku_total
-          g['Target'] = g['Target'].astype(float) * _ratio
-          g['%MTD'] = g.apply(
-              lambda r: round(float(r['SellOut']) / float(r['Target']) * 100, 0)
-              if float(r['Target'] or 0) > 0 else 0.0,
-              axis=1,
-          )
+          # Chỉ scale khi ratio hợp lý (tránh zero/nổ số)
+          if 0.5 <= _ratio <= 3.0:
+            g['Target'] = g['Target'].astype(float) * _ratio
+            g['%MTD'] = g.apply(
+                lambda r: round(float(r['SellOut']) / float(r['Target']) * 100, 0)
+                if float(r['Target'] or 0) > 0 else 0.0,
+                axis=1,
+            )
     except Exception:
       pass
     # Grand Total
@@ -10186,10 +10190,14 @@ def build_perf_nv_matrix(df_raw, month, filter_nv=None, df_rpt=None, report_date
       for i, row in out.iterrows():
         nv = str(row.get('Tên NVBH', '')).strip()
         to_tgt = _to_by_name.get(nv) or _to_by_name.get(nv.lower()) or 0
-        if to_tgt and float(to_tgt) > 0:
-          # Target_KPI = VND; file Performance TARGET SO = triệu đồng
-          to_tgt_m = float(to_tgt) / 1_000_000.0
-          out.loc[i] = _scale_row_targets_to_turnover(row.to_dict(), cats, to_tgt_m)
+        if not to_tgt or float(to_tgt) <= 0:
+          continue
+        # Target_KPI = VND; file Performance TARGET SO = triệu đồng
+        to_tgt_m = float(to_tgt) / 1_000_000.0
+        scaled = _scale_row_targets_to_turnover(dict(row), cats, to_tgt_m)
+        for k, v in scaled.items():
+          if k in out.columns:
+            out.at[i, k] = v
   except Exception:
     pass
   # Total row
