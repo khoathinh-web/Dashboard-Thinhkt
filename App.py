@@ -3808,7 +3808,21 @@ def _mcp_vip_outlet_map(mcp_df):
     return out
   mcp = mcp_df.copy()
   c_ma = find_col(mcp, ['Outlet_code', 'Outlet Code', 'Mã CH', 'Mã KH', 'OUTLET_CODE'])
-  c_vip = find_col(mcp, ['VIP MCH', 'VIP_MCH', 'VIP', 'Nhóm VIP', 'VIP Group', 'Customer Group'])
+  c_vip = find_col(mcp, [
+      'VIP MCH', 'VIP_MCH', 'VIP', 'Nhóm VIP', 'VIP Group', 'Customer Group',
+      'VIP Type', 'Loại VIP', 'Group VIP', 'Cust Group', 'Customer_Group',
+      'SEGMENT', 'Segment', 'Hạng KH', 'Hang KH',
+  ])
+  # fallback: cột nào có giá trị chứa VIP3/VIP5/VIPSI
+  if not c_vip:
+    for c in mcp.columns:
+      try:
+        sample = mcp[c].astype(str).str.upper().str.replace(' ', '', regex=False)
+        if sample.str.contains('VIP3|VIP5|VIPSI', na=False).any():
+          c_vip = c
+          break
+      except Exception:
+        pass
   c_l1 = find_col(mcp, ['L1', 'x_msc_business_type_l1', 'Kênh', 'Channel'])
   if not c_ma or not c_vip:
     return out
@@ -3826,14 +3840,29 @@ def _mcp_vip_outlet_map(mcp_df):
 
   mcp['_ma'] = mcp[c_ma].map(_nma)
   mcp['_vip'] = mcp[c_vip].astype(str).str.strip().str.upper()
-  # chuẩn hóa VIPSI
+  mcp['_vip'] = (
+      mcp['_vip']
+      .str.replace(' ', '', regex=False)
+      .str.replace('_', '', regex=False)
+      .str.replace('-', '', regex=False)
+  )
+  # VIP SI → VIPSI; VIP3/5 variants
   mcp['_vip'] = mcp['_vip'].replace({
-      'VIP SI': 'VIPSI', 'VIP_SI': 'VIPSI', 'VIP-SI': 'VIPSI',
+      'VIPSI': 'VIPSI', 'VIPSI.': 'VIPSI',
+      'VIP3': 'VIP3', 'VIP03': 'VIP3',
+      'VIP5': 'VIP5', 'VIP05': 'VIP5',
   })
   if c_l1:
     mcp = mcp[mcp[c_l1].astype(str).str.contains('Off', case=False, na=False)]
   for g in ('VIP3', 'VIP5', 'VIPSI'):
-    out[g] = set(mcp.loc[mcp['_vip'] == g, '_ma'].tolist())
+    if g == 'VIPSI':
+      mask = mcp['_vip'].str.contains('VIPSI', case=False, na=False)
+    else:
+      mask = mcp['_vip'] == g
+      # fallback contains if exact empty
+      if not mask.any():
+        mask = mcp['_vip'].str.contains(g, case=False, na=False) & ~mcp['_vip'].str.contains('VIPSI', case=False, na=False)
+    out[g] = set(x for x in mcp.loc[mask, '_ma'].tolist() if x)
   return out
 
 
@@ -3898,6 +3927,25 @@ def build_weekly_lppc_vip(mcp_df, sales_hist, df_rpt=None, filter_nv=None, month
     if sub is None or sub.empty or 'Mã CH' not in sub.columns:
       return
     sub = sub.copy()
+    # Chỉ kênh OFF
+    if 'L1' in sub.columns:
+      sub = sub[sub['L1'].astype(str).str.contains('Off', case=False, na=False)]
+    # Trừ Meat/Beer
+    if 'Tên SP lower' not in sub.columns and 'Tên sản phẩm' in sub.columns:
+      sub['Tên SP lower'] = sub['Tên sản phẩm'].astype(str).str.lower()
+    if 'Sub Division' in sub.columns or 'Tên SP lower' in sub.columns:
+      sub_s = sub['Sub Division'].astype(str) if 'Sub Division' in sub.columns else pd.Series('', index=sub.index)
+      name = sub['Tên SP lower'] if 'Tên SP lower' in sub.columns else pd.Series('', index=sub.index)
+      is_ex = sub_s.str.contains(
+          'Beer|Bia|Processed Meats|Thịt chế biến', case=False, na=False
+      ) | name.str.contains(
+          'beer|bia lush|white lion|red ruby|xúc xích|xuc xich|ponnie|'
+          'cao bồi|cao boi|hotdog|thịt viên|chân gà',
+          na=False,
+      )
+      sub = sub[~is_ex]
+    if sub.empty:
+      return
     sub['_ma'] = sub['Mã CH'].map(_nma)
     pos_col = find_col(sub, ['Position code', 'POS_CODE', 'Position Code'])
     if pos_col:
@@ -3937,19 +3985,36 @@ def build_weekly_lppc_vip(mcp_df, sales_hist, df_rpt=None, filter_nv=None, month
         pass
 
   if not s_norm.empty and 'Month' in s_norm.columns:
+    # Chuẩn hóa cột Month → MM/YYYY
+    def _norm_month(x):
+      s = str(x).strip()
+      for sep in ('/', '-', '.'):
+        if sep in s:
+          parts = s.split(sep)
+          if len(parts) >= 2:
+            try:
+              a, b = int(parts[0]), int(parts[1])
+              if a > 12:  # YYYY/M
+                return f'{b:02d}/{a}'
+              return f'{a:02d}/{b}'
+            except Exception:
+              pass
+      return s
+    s_norm = s_norm.copy()
+    s_norm['_mon'] = s_norm['Month'].map(_norm_month)
     for y, m in months:
       label = f'{m:02d}/{y}'
       if m == 10 and y == 2026:
         continue
-      sub = s_norm[s_norm['Month'].astype(str).str.strip() == label].copy()
+      sub = s_norm[s_norm['_mon'] == label].copy()
       if not sub.empty:
         _run_month(sub, label)
 
   if df_rpt is not None and not df_rpt.empty:
     for y, m in months:
       label = f'{m:02d}/{y}'
-      # chỉ fill nếu tháng chưa có data
-      if any(lppc_by[label][g] for g in vip_groups):
+      # fill nếu tháng chưa có data (hoặc tháng hiện tại)
+      if any(lppc_by[label][g] for g in vip_groups) and not (m == 10 and y == 2026):
         continue
       try:
         start_d = date(y, m, 1)
