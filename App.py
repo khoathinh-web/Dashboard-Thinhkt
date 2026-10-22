@@ -9955,10 +9955,8 @@ def build_perf_by_month(df_raw, filter_nv=None, n_months=4, df_rpt=None, report_
               seen.add(k.lower())
         sku_total = float(g['Target'].sum())
         if to_total > 0 and sku_total > 0:
-          # Target_KPI = VND → triệu
-          to_total_m = float(to_total) / 1_000_000.0
-          _ratio = to_total_m / sku_total
-          # Chỉ scale khi ratio hợp lý (tránh zero/nổ số)
+          # Cả hai nguồn đều VND
+          _ratio = float(to_total) / float(sku_total)
           if 0.5 <= _ratio <= 3.0:
             g['Target'] = g['Target'].astype(float) * _ratio
             g['%MTD'] = g.apply(
@@ -10257,9 +10255,8 @@ def build_perf_nv_matrix(df_raw, month, filter_nv=None, df_rpt=None, report_date
         to_tgt = _to_by_name.get(nv) or _to_by_name.get(nv.lower()) or 0
         if not to_tgt or float(to_tgt) <= 0:
           continue
-        # Target_KPI = VND; file Performance TARGET SO = triệu đồng
-        to_tgt_m = float(to_tgt) / 1_000_000.0
-        scaled = _scale_row_targets_to_turnover(dict(row), cats, to_tgt_m)
+        # Cả Target_KPI và TARGET SO trong file đều là VND (hiển thị ÷1e6)
+        scaled = _scale_row_targets_to_turnover(dict(row), cats, float(to_tgt))
         for k, v in scaled.items():
           if k in out.columns:
             out.at[i, k] = v
