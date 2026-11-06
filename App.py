@@ -7280,54 +7280,117 @@ def build_summary_report(
     df_kpi = _filter_df_by_thu_weekdays(df_kpi, effective_thu_list, report_date)
 
   vip_target_map, vip_actual_map = {}, {}
-  if not mcp_filtered.empty:
-    c_nv_mcp = find_col(mcp_filtered, ['SM Name', 'SM name', 'Tên NVBH', 'Nhân viên'])
-    c_vip = find_col(mcp_filtered, ['VIP MCH', 'VIP_MCH', 'VIP', 'Nhóm VIP', 'VIP Group'])
-    c_ma_mcp = find_col(mcp_filtered, ['Outlet_code', 'Outlet Code', 'Mã CH', 'Mã KH'])
-    if c_nv_mcp and c_vip and c_ma_mcp:
-      def _nma_v(x):
-        s = str(x).strip()
-        return s[:-2] if s.endswith('.0') else s
-      _vip_ok = mcp_filtered[c_vip].astype(str).str.strip().str.upper()
-      df_vip_sub = mcp_filtered[
-          _vip_ok.str.contains(r'VIP\s*3|VIP\s*5|VIPSI|VIP\s*SI', case=False, na=False, regex=True)
-      ].copy()
-      df_vip_sub['NV'] = df_vip_sub[c_nv_mcp].astype(str).str.strip()
-      df_vip_sub['MA'] = df_vip_sub[c_ma_mcp].map(_nma_v)
-      vip_target_map = (
-          df_vip_sub.drop_duplicates(subset=['NV', 'MA'])
-          .groupby('NV')['MA'].nunique().to_dict()
-      )
-      # Actual: VIP có phát sinh DS trong RPT — không lấy cột DS trên MCP
-      try:
-        _sales = df_kpi if df_kpi is not None and not getattr(df_kpi, 'empty', True) else df
-        if _sales is not None and not getattr(_sales, 'empty', True):
-          c_ch_s = find_col(_sales, ['Mã CH', 'Outlet_code', 'Outlet Code', 'Mã KH'])
-          c_val_s = find_col(_sales, [
-              'Thành tiền trước CK', 'Thành tiền trước chiết khấu',
-              'Thành tiền', 'Doanh số', 'Tổng tiền',
-          ])
-          if c_ch_s is not None:
-            s2 = _sales.copy()
-            s2['_ma'] = s2[c_ch_s].map(_nma_v)
-            if c_val_s:
-              s2['_v'] = pd.to_numeric(s2[c_val_s], errors='coerce').fillna(0)
-              s2 = s2[s2['_v'] > 0]
-            vip_ma_set = set(df_vip_sub['MA'].tolist())
-            s2 = s2[s2['_ma'].isin(vip_ma_set)]
-            ma_to_nv = (
-                df_vip_sub.drop_duplicates(subset=['MA'])
-                .set_index('MA')['NV'].to_dict()
-            )
-            s2['NV'] = s2['_ma'].map(ma_to_nv)
-            s2 = s2[s2['NV'].notna()]
-            if not s2.empty:
-              vip_actual_map = (
-                  s2.drop_duplicates(subset=['NV', '_ma'])
-                  .groupby('NV')['_ma'].nunique().to_dict()
+
+  def _nma_v(x):
+    if pd.isna(x):
+      return ''
+    s = str(x).strip()
+    if s.endswith('.0'):
+      s = s[:-2]
+    try:
+      return str(int(float(s)))
+    except Exception:
+      return s
+
+  def _norm_nv_key(s):
+    return ' '.join(str(s).strip().lower().split())
+
+  # ---- VIP MCH: CT = số KH VIP3/5/SI trên MCP; TH = VIP có DS trên RPT ----
+  if mcp_df is not None and not getattr(mcp_df, 'empty', True):
+    mcp_v = mcp_filtered.copy() if not mcp_filtered.empty else mcp_df.copy()
+    c_nv_mcp = find_col(mcp_v, ['SM Name', 'SM name', 'Tên NVBH', 'Nhân viên'])
+    c_ma_mcp = find_col(mcp_v, ['Outlet_code', 'Outlet Code', 'Mã CH', 'Mã KH', 'OUTLET_CODE'])
+    c_vip = find_col(mcp_v, [
+        'VIP MCH', 'VIP_MCH', 'VIP', 'Nhóm VIP', 'VIP Group', 'Customer Group',
+        'VIP Type', 'Loại VIP', 'Group VIP', 'Cust Group', 'Customer_Group',
+        'SEGMENT', 'Segment', 'Hạng KH', 'Hang KH',
+    ])
+    if not c_vip:
+      for c in mcp_v.columns:
+        try:
+          sample = mcp_v[c].astype(str).str.upper().str.replace(' ', '', regex=False)
+          if sample.str.contains('VIP3|VIP5|VIPSI', na=False).any():
+            c_vip = c
+            break
+        except Exception:
+          pass
+    if c_nv_mcp and c_ma_mcp and c_vip:
+      def _norm_vip_val(x):
+        s = str(x).strip().upper().replace(' ', '').replace('_', '').replace('-', '')
+        if 'VIPSI' in s:
+          return 'VIPSI'
+        if 'VIP3' in s or s == 'VIP03':
+          return 'VIP3'
+        if 'VIP5' in s or s == 'VIP05':
+          return 'VIP5'
+        return s
+      mcp_v = mcp_v.copy()
+      mcp_v['_nv'] = mcp_v[c_nv_mcp].astype(str).str.strip()
+      mcp_v['_ma'] = mcp_v[c_ma_mcp].map(_nma_v)
+      mcp_v['_vip'] = mcp_v[c__vip].map(_norm_vip_val)
+      df_vip_sub = mcp_v[mcp_v['_vip'].isin(['VIP3', 'VIP5', 'VIPSI'])].copy()
+      df_vip_sub = df_vip_sub[df_vip_sub['_ma'] != '']
+      if not df_vip_sub.empty:
+        # CT theo tên NV gốc trên MCP
+        vip_target_map = (
+            df_vip_sub.drop_duplicates(subset=['_nv', '_ma'])
+            .groupby('_nv')['_ma'].nunique().to_dict()
+        )
+        # Alias key chuẩn hoá để khớp nv_list
+        vip_target_norm = {}
+        for k, v in vip_target_map.items():
+          vip_target_norm[_norm_nv_key(k)] = vip_target_norm.get(_norm_nv_key(k), 0) + int(v)
+
+        # TH: VIP có phát sinh DS trên RPT (df_kpi / df)
+        try:
+          _sales = df_kpi if df_kpi is not None and not getattr(df_kpi, 'empty', True) else df
+          if _sales is not None and not getattr(_sales, 'empty', True):
+            c_ch_s = find_col(_sales, ['Mã CH', 'Outlet_code', 'Outlet Code', 'Mã KH'])
+            c_val_s = find_col(_sales, [
+                'Thành tiền trước CK', 'Thành tiền trước chiết khấu',
+                'Thành tiền', 'Doanh số', 'Tổng tiền',
+            ])
+            if c_ch_s is not None:
+              s2 = _sales.copy()
+              s2['_ma'] = s2[c_ch_s].map(_nma_v)
+              if c_val_s:
+                s2['_v'] = pd.to_numeric(s2[c_val_s], errors='coerce').fillna(0)
+                s2 = s2[s2['_v'] > 0]
+              vip_ma_set = set(df_vip_sub['_ma'].tolist())
+              s2 = s2[s2['_ma'].isin(vip_ma_set)]
+              ma_to_nv = (
+                  df_vip_sub.drop_duplicates(subset=['_ma'])
+                  .set_index('_ma')['_nv'].to_dict()
               )
-      except Exception:
-        vip_actual_map = {}
+              s2['_nv'] = s2['_ma'].map(ma_to_nv)
+              s2 = s2[s2['_nv'].notna()]
+              if not s2.empty:
+                vip_actual_map = (
+                    s2.drop_duplicates(subset=['_nv', '_ma'])
+                    .groupby('_nv')['_ma'].nunique().to_dict()
+                )
+        except Exception:
+          vip_actual_map = {}
+        vip_actual_norm = {}
+        for k, v in vip_actual_map.items():
+          vip_actual_norm[_norm_nv_key(k)] = vip_actual_norm.get(_norm_nv_key(k), 0) + int(v)
+
+        # Ghi đè lookup theo cả tên gốc + tên chuẩn hoá
+        # (dùng lúc build rows)
+        _VIP_TARGET_NORM = vip_target_norm
+        _VIP_ACTUAL_NORM = vip_actual_norm
+      else:
+        _VIP_TARGET_NORM, _VIP_ACTUAL_NORM = {}, {}
+    else:
+      _VIP_TARGET_NORM, _VIP_ACTUAL_NORM = {}, {}
+  else:
+    _VIP_TARGET_NORM, _VIP_ACTUAL_NORM = {}, {}
+
+  # Đảm bảo NV có VIP trên MCP vẫn xuất hiện trên bảng (kể cả không có combo/cat)
+  if vip_target_map:
+    extra = [n for n in vip_target_map.keys() if n and n not in nv_list]
+    if extra:
+      nv_list = sorted(list(nv_list) + extra)
 
   df_mtd = df[
       df['date'] >= date(report_date.year, report_date.month, 1)
@@ -7562,8 +7625,8 @@ def build_summary_report(
 
   rows = []
   for nv in nv_list:
-    v_tgt = int(vip_target_map.get(nv, 0))
-    v_act = int(vip_actual_map.get(nv, 0))
+    v_tgt = int(vip_target_map.get(nv, 0) or _VIP_TARGET_NORM.get(_norm_nv_key(nv), 0))
+    v_act = int(vip_actual_map.get(nv, 0) or _VIP_ACTUAL_NORM.get(_norm_nv_key(nv), 0))
     v_pct = round(v_act / v_tgt * 100, 1) if v_tgt else 0
 
     off_tgt = int(off_target_map.get(nv, 0))
@@ -7713,34 +7776,107 @@ def build_summary_report(
           except Exception:
             pass
 
-    # TURNOVER — hàm riêng
+    # TURNOVER + PC_BT (+ các KPI khác): lấy đúng từ build_* giống Tab KPI
     _mcp_kpi = mcp_filtered if effective_thu_list else mcp_df
+    # Không lọc Thứ → dùng full df (khớp 100% báo cáo KPI). Có lọc Thứ → df_kpi.
+    _df_kpi_src = df_kpi if effective_thu_list else df
+
+    def _sum_name_idx():
+      """Map tên chuẩn hoá + biến thể → index dòng df_out."""
+      out = {}
+      for i, v in df_out['Tên NV'].astype(str).items():
+        raw = str(v).strip()
+        nk = _norm_name(raw)
+        out[nk] = i
+        # bỏ tiền tố CDGT- / khoảng trắng thừa
+        out[_norm_name(raw.replace('CDGT-', '').replace('CDGT', ''))] = i
+      return out
+
+    def _resolve_idx(name_to_idx, nm_raw):
+      nk = _norm_name(nm_raw)
+      if nk in name_to_idx:
+        return name_to_idx[nk]
+      nk2 = _norm_name(str(nm_raw).replace('CDGT-', '').replace('CDGT', ''))
+      if nk2 in name_to_idx:
+        return name_to_idx[nk2]
+      # khớp chứa (tên ngắn trong tên dài hoặc ngược lại)
+      for k, i in name_to_idx.items():
+        if not k or not nk:
+          continue
+        if k in nk or nk in k:
+          return i
+      return None
+
+    def _apply_kpi_strict(df_k, c_ct, c_th, c_pct, as_float=False,
+                          ct_prefer=None, th_prefer=None):
+      """Gắn CT/TH/% từ df KPI → df_out; ưu tiên đúng tên cột KPI."""
+      if df_k is None or df_k.empty:
+        return
+      name_col = None
+      for c in ('Tên NVBH', 'Tên NV', 'SM Name'):
+        if c in df_k.columns:
+          name_col = c
+          break
+      if not name_col:
+        return
+      body = df_k[~df_k[name_col].astype(str).str.upper().str.contains(
+          'TOTAL|TỔNG|SS ', na=False, regex=True
+      )].copy()
+      col_ct = None
+      for cand in (ct_prefer or []) + [
+          'Chỉ Tiêu Doanh Số', 'Chỉ Tiêu KPI', 'Chỉ Tiêu MCP', 'Chỉ Tiêu', 'Target'
+      ]:
+        if cand and cand in body.columns:
+          col_ct = cand
+          break
+      if col_ct is None:
+        col_ct = _find_ct_col(body.columns)
+      col_mtd = None
+      for cand in (th_prefer or []) + ['Doanh Số MTD', 'MTD', 'Thực Hiện', 'Thực Hiện Ngày']:
+        if cand and cand in body.columns:
+          # Với TURNOVER ưu tiên Doanh Số MTD (không lấy Thực Hiện Ngày)
+          if cand == 'Thực Hiện Ngày' and 'Doanh Số MTD' in body.columns:
+            continue
+          col_mtd = cand
+          break
+      if col_mtd is None:
+        col_mtd = _find_mtd_col(body.columns, prefer=['Doanh Số MTD', 'MTD'])
+      col_pct = '% MTD' if '% MTD' in body.columns else None
+      name_to_idx = _sum_name_idx()
+      for _, kr in body.iterrows():
+        idx = _resolve_idx(name_to_idx, kr[name_col])
+        if idx is None:
+          continue
+        if col_ct is not None and pd.notna(kr.get(col_ct)):
+          try:
+            v = float(kr[col_ct])
+            df_out.at[idx, c_ct] = round(v, 2) if as_float else int(round(v))
+          except Exception:
+            pass
+        if col_mtd is not None and pd.notna(kr.get(col_mtd)):
+          try:
+            v = float(kr[col_mtd])
+            df_out.at[idx, c_th] = round(v, 2) if as_float else int(round(v))
+          except Exception:
+            pass
+        if col_pct is not None and pd.notna(kr.get(col_pct)):
+          df_out.at[idx, c_pct] = str(kr[col_pct])
+        elif col_ct is not None and col_mtd is not None:
+          try:
+            ct = float(kr[col_ct]); th = float(kr[col_mtd])
+            df_out.at[idx, c_pct] = f'{round(th / ct * 100, 1)}%' if ct else '0%'
+          except Exception:
+            pass
 
     try:
-      # CT lấy full tháng (target); TH lấy data đã lọc CH theo Thứ
-      df_to_ct, _, _ = build_turnover_report(df, report_date, _to_tgt, filter_nv)
-      _apply_kpi_df(df_to_ct, 'CT DS', 'TH DS', '% MTD DS', as_float=False)
-      # TH Doanh Số theo Thứ/chu kỳ: tổng DS các ngày khớp weekday
-      # → chia cho số ngày khớp đã trôi qua để ra TH/ngày (cùng đơn vị CT ngày)
+      # CT + TH Doanh Số full tháng từ đúng hàm KPI TURNOVER
+      df_to, _, _ = build_turnover_report(df, report_date, _to_tgt, filter_nv)
+      _apply_kpi_strict(
+          df_to, 'CT DS', 'TH DS', '% MTD DS', as_float=False,
+          ct_prefer=['Chỉ Tiêu Doanh Số'], th_prefer=['Doanh Số MTD'],
+      )
+      # Có lọc Thứ: TH = DS các CH/ngày khớp lịch VT (không chia trung bình ngày)
       if effective_thu_list:
-        try:
-          _rd = report_date if isinstance(report_date, date) else pd.Timestamp(report_date).date()
-        except Exception:
-          _rd = report_date
-        wdays = _weekdays_from_thu_filter(effective_thu_list)
-        # số ngày bán (weekday khớp) từ đầu tháng → report_date
-        n_days = 0
-        try:
-          _cur = date(_rd.year, _rd.month, 1)
-          while _cur <= _rd:
-            if _cur.weekday() in wdays:
-              # trừ CN đã loại vì wdays không có 6=Sun; trừ lễ nếu có
-              n_days += 1
-            _cur += timedelta(days=1)
-        except Exception:
-          n_days = 1
-        n_days = max(n_days, 1)
-
         df_to_th, _, _ = build_turnover_report(df_kpi, report_date, _to_tgt, filter_nv)
         if df_to_th is not None and not df_to_th.empty:
           name_col = 'Tên NVBH' if 'Tên NVBH' in df_to_th.columns else None
@@ -7749,26 +7885,20 @@ def build_summary_report(
             body = df_to_th[~df_to_th[name_col].astype(str).str.upper().str.contains(
                 'TOTAL|TỔNG', na=False, regex=True
             )]
-            name_to_idx = {
-                ' '.join(str(v).strip().lower().split()): i
-                for i, v in df_out['Tên NV'].astype(str).items()
-            }
+            name_to_idx = _sum_name_idx()
             for _, kr in body.iterrows():
-              nm = ' '.join(str(kr[name_col]).strip().lower().split())
-              if nm not in name_to_idx:
+              idx = _resolve_idx(name_to_idx, kr[name_col])
+              if idx is None:
                 continue
-              idx = name_to_idx[nm]
               try:
                 th_sum = float(kr[mtd_col])
               except Exception:
                 th_sum = 0.0
-              th_day = th_sum / n_days
-              df_out.at[idx, 'TH DS'] = int(round(th_day))
+              df_out.at[idx, 'TH DS'] = int(round(th_sum))
               try:
                 ct = float(df_out.at[idx, 'CT DS'])
-                # CT lúc này vẫn là tháng; CT ngày apply sau — tạm % theo tháng CT
                 df_out.at[idx, '% MTD DS'] = (
-                    f'{round(th_day / ct * 100, 1)}%' if ct else '0%'
+                    f'{round(th_sum / ct * 100, 1)}%' if ct else '0%'
                 )
               except Exception:
                 pass
@@ -7783,9 +7913,13 @@ def build_summary_report(
     ]:
       try:
         df_k, _, _ = build_report(
-            df_kpi, report_date, targets, rt, filter_nv, mcp_df=_mcp_kpi
+            _df_kpi_src, report_date, targets, rt, filter_nv, mcp_df=_mcp_kpi
         )
-        _apply_kpi_df(df_k, c_ct, c_th, c_pct, as_float=as_f)
+        _apply_kpi_strict(
+            df_k, c_ct, c_th, c_pct, as_float=as_f,
+            ct_prefer=['Chỉ Tiêu KPI', 'Chỉ Tiêu MCP', 'Chỉ Tiêu'],
+            th_prefer=['MTD', 'Doanh Số MTD'],
+        )
       except Exception:
         pass
 
