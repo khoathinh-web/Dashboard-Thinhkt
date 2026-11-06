@@ -7327,7 +7327,7 @@ def build_summary_report(
       mcp_v = mcp_v.copy()
       mcp_v['_nv'] = mcp_v[c_nv_mcp].astype(str).str.strip()
       mcp_v['_ma'] = mcp_v[c_ma_mcp].map(_nma_v)
-      mcp_v['_vip'] = mcp_v[c__vip].map(_norm_vip_val)
+      mcp_v['_vip'] = mcp_v[c_vip].map(_norm_vip_val)
       df_vip_sub = mcp_v[mcp_v['_vip'].isin(['VIP3', 'VIP5', 'VIPSI'])].copy()
       df_vip_sub = df_vip_sub[df_vip_sub['_ma'] != '']
       if not df_vip_sub.empty:
