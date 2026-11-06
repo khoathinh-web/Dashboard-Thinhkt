@@ -6070,10 +6070,44 @@ def build_visit_report(
   )
   c_nv_code = find_col(mcp_f, ['SM Code', 'Mã NVBH', 'SM code']) or 'SM code'
   c_ma_col = (
-      find_col(mcp_f, ['Outlet_code', 'Outlet Code', 'Mã CH']) or 'Outlet_code'
+      find_col(mcp_f, ['Outlet_code', 'Outlet Code', 'Mã CH', 'Mã KH']) or 'Outlet_code'
   )
-  c_vip = find_col(mcp_f, ['VIP MCH', 'VIP_MCH'])
-  c_l1 = find_col(mcp_f, ['L1', 'Channel'])
+  c_vip = find_col(mcp_f, [
+      'VIP MCH', 'VIP_MCH', 'VIP', 'Nhóm VIP', 'VIP Group', 'Customer Group',
+      'VIP Type', 'Loại VIP', 'Group VIP', 'SEGMENT', 'Segment', 'Hạng KH',
+  ])
+  # fallback: cột nào chứa giá trị VIP3/VIP5/VIPSI
+  if not c_vip:
+    for c in mcp_f.columns:
+      try:
+        sample = mcp_f[c].astype(str).str.upper().str.replace(' ', '', regex=False)
+        if sample.str.contains('VIP3|VIP5|VIPSI', na=False).any():
+          c_vip = c
+          break
+      except Exception:
+        pass
+  c_l1 = find_col(mcp_f, ['L1', 'Channel', 'x_msc_business_type_l1', 'Kênh'])
+
+  def _nma_vt(x):
+    if pd.isna(x):
+      return ''
+    s = str(x).strip()
+    if s.endswith('.0'):
+      s = s[:-2]
+    try:
+      return str(int(float(s)))
+    except Exception:
+      return s
+
+  def _norm_vip(x):
+    s = str(x).strip().upper().replace(' ', '').replace('_', '').replace('-', '')
+    if 'VIPSI' in s or s in ('VIPSI', 'VIPSI.'):
+      return 'VIPSI'
+    if s in ('VIP3', 'VIP03') or s.startswith('VIP3'):
+      return 'VIP3'
+    if s in ('VIP5', 'VIP05') or s.startswith('VIP5'):
+      return 'VIP5'
+    return s
 
   df_mtd = (
       df_rpt[df_rpt['date'] >= date(report_date.year, report_date.month, 1)]
@@ -6081,11 +6115,21 @@ def build_visit_report(
       if df_rpt is not None and not df_rpt.empty
       else pd.DataFrame()
   )
-  active_ma_set = (
-      set(df_mtd['Mã CH'].astype(str).str.strip().unique())
-      if not df_mtd.empty
-      else set()
-  )
+  if not df_mtd.empty:
+    c_ma_rpt = find_col(df_mtd, ['Mã CH', 'Outlet_code', 'Outlet Code', 'Mã KH'])
+    if c_ma_rpt:
+      active_ma_set = set(df_mtd[c_ma_rpt].map(_nma_vt).tolist()) - {''}
+    elif 'Mã CH' in df_mtd.columns:
+      active_ma_set = set(df_mtd['Mã CH'].map(_nma_vt).tolist()) - {''}
+    else:
+      active_ma_set = set()
+  else:
+    active_ma_set = set()
+
+  # Chuẩn hoá cột VIP trên mcp_f
+  if c_vip:
+    mcp_f = mcp_f.copy()
+    mcp_f['_vip_norm'] = mcp_f[c_vip].map(_norm_vip)
 
   nv_list = (
       sorted(mcp_f[c_nv_name].dropna().astype(str).unique().tolist())
@@ -6102,17 +6146,13 @@ def build_visit_report(
         else ''
     )
 
-    sub_v3 = (
-        sub[sub[c_vip].astype(str).str.strip() == 'VIP3'] if c_vip else pd.DataFrame()
-    )
-    sub_v5 = (
-        sub[sub[c_vip].astype(str).str.strip() == 'VIP5'] if c_vip else pd.DataFrame()
-    )
-    sub_vsi = (
-        sub[sub[c_vip].astype(str).str.strip() == 'VIPSI']
-        if c_vip
-        else pd.DataFrame()
-    )
+    if c_vip and '_vip_norm' in sub.columns:
+      sub_v3 = sub[sub['_vip_norm'] == 'VIP3']
+      sub_v5 = sub[sub['_vip_norm'] == 'VIP5']
+      sub_vsi = sub[sub['_vip_norm'] == 'VIPSI']
+    else:
+      sub_v3 = sub_v5 = sub_vsi = pd.DataFrame()
+
     sub_on = (
         sub[sub[c_l1].astype(str).str.contains('On', case=False, na=False)]
         if c_l1
@@ -6124,18 +6164,16 @@ def build_visit_report(
         if c_l1
         else sub
     )
-    if c_vip:
-      sub_le = off_sub[
-          ~off_sub[c_vip].astype(str).str.strip().isin(['VIP3', 'VIP5', 'VIPSI'])
-      ]
+    if c_vip and '_vip_norm' in off_sub.columns:
+      sub_le = off_sub[~off_sub['_vip_norm'].isin(['VIP3', 'VIP5', 'VIPSI'])]
     else:
       sub_le = off_sub
 
     def get_metrics(sub_subset):
-      if sub_subset.empty:
+      if sub_subset is None or sub_subset.empty:
         return 0, 0, '0.0%'
-      total_kh = sub_subset[c_ma_col].nunique()
-      ma_set = set(sub_subset[c_ma_col].astype(str).str.strip().unique())
+      ma_set = set(sub_subset[c_ma_col].map(_nma_vt).tolist()) - {''}
+      total_kh = len(ma_set)
       da_mua = len(ma_set.intersection(active_ma_set))
       pct = round(da_mua / total_kh * 100, 1) if total_kh else 0.0
       return total_kh, da_mua, f'{pct}%'
@@ -6146,12 +6184,9 @@ def build_visit_report(
     le_t, le_m, le_p = get_metrics(sub_le)
     on_t, on_m, on_p = get_metrics(sub_on)
 
-    total_vt = sub[c_ma_col].nunique()
-    total_mua = len(
-        set(sub[c_ma_col].astype(str).str.strip().unique()).intersection(
-            active_ma_set
-        )
-    )
+    _all_ma = set(sub[c_ma_col].map(_nma_vt).tolist()) - {''}
+    total_vt = len(_all_ma)
+    total_mua = len(_all_ma.intersection(active_ma_set))
     total_pct = round(total_mua / total_vt * 100, 1) if total_vt else 0.0
 
     rows.append({
@@ -7247,31 +7282,52 @@ def build_summary_report(
   vip_target_map, vip_actual_map = {}, {}
   if not mcp_filtered.empty:
     c_nv_mcp = find_col(mcp_filtered, ['SM Name', 'SM name', 'Tên NVBH', 'Nhân viên'])
-    c_vip = find_col(mcp_filtered, ['VIP MCH', 'VIP_MCH'])
-    c_ma_mcp = find_col(mcp_filtered, ['Outlet_code', 'Outlet Code', 'Mã CH'])
+    c_vip = find_col(mcp_filtered, ['VIP MCH', 'VIP_MCH', 'VIP', 'Nhóm VIP', 'VIP Group'])
+    c_ma_mcp = find_col(mcp_filtered, ['Outlet_code', 'Outlet Code', 'Mã CH', 'Mã KH'])
     if c_nv_mcp and c_vip and c_ma_mcp:
+      def _nma_v(x):
+        s = str(x).strip()
+        return s[:-2] if s.endswith('.0') else s
+      _vip_ok = mcp_filtered[c_vip].astype(str).str.strip().str.upper()
       df_vip_sub = mcp_filtered[
-          mcp_filtered[c_vip].astype(str).str.strip().isin(['VIP3', 'VIP5', 'VIPSI'])
+          _vip_ok.str.contains(r'VIP\s*3|VIP\s*5|VIPSI|VIP\s*SI', case=False, na=False, regex=True)
       ].copy()
       df_vip_sub['NV'] = df_vip_sub[c_nv_mcp].astype(str).str.strip()
-      df_vip_sub['MA'] = df_vip_sub[c_ma_mcp].astype(str).str.strip()
+      df_vip_sub['MA'] = df_vip_sub[c_ma_mcp].map(_nma_v)
       vip_target_map = (
-          df_vip_sub.groupby('NV')['MA'].nunique().to_dict()
+          df_vip_sub.drop_duplicates(subset=['NV', 'MA'])
+          .groupby('NV')['MA'].nunique().to_dict()
       )
-
-      col_ds_mcp = find_col(
-          df_vip_sub, ['Doanh Số MTD', 'Doanh số MTD', 'Doanh_so_MTD']
-      )
-      if col_ds_mcp:
-        df_vip_sub['DS'] = (
-            pd.to_numeric(df_vip_sub[col_ds_mcp], errors='coerce').fillna(0)
-        )
-        vip_actual_map = (
-            df_vip_sub[df_vip_sub['DS'] > 0]
-            .groupby('NV')['MA']
-            .nunique()
-            .to_dict()
-        )
+      # Actual: VIP có phát sinh DS trong RPT — không lấy cột DS trên MCP
+      try:
+        _sales = df_kpi if df_kpi is not None and not getattr(df_kpi, 'empty', True) else df
+        if _sales is not None and not getattr(_sales, 'empty', True):
+          c_ch_s = find_col(_sales, ['Mã CH', 'Outlet_code', 'Outlet Code', 'Mã KH'])
+          c_val_s = find_col(_sales, [
+              'Thành tiền trước CK', 'Thành tiền trước chiết khấu',
+              'Thành tiền', 'Doanh số', 'Tổng tiền',
+          ])
+          if c_ch_s is not None:
+            s2 = _sales.copy()
+            s2['_ma'] = s2[c_ch_s].map(_nma_v)
+            if c_val_s:
+              s2['_v'] = pd.to_numeric(s2[c_val_s], errors='coerce').fillna(0)
+              s2 = s2[s2['_v'] > 0]
+            vip_ma_set = set(df_vip_sub['MA'].tolist())
+            s2 = s2[s2['_ma'].isin(vip_ma_set)]
+            ma_to_nv = (
+                df_vip_sub.drop_duplicates(subset=['MA'])
+                .set_index('MA')['NV'].to_dict()
+            )
+            s2['NV'] = s2['_ma'].map(ma_to_nv)
+            s2 = s2[s2['NV'].notna()]
+            if not s2.empty:
+              vip_actual_map = (
+                  s2.drop_duplicates(subset=['NV', '_ma'])
+                  .groupby('NV')['_ma'].nunique().to_dict()
+              )
+      except Exception:
+        vip_actual_map = {}
 
   df_mtd = df[
       df['date'] >= date(report_date.year, report_date.month, 1)
@@ -7285,52 +7341,79 @@ def build_summary_report(
     return is_combo_line_t10(row)
 
     # Target Combo từ master list (OFF/ON) — giữ lọc Thứ VT nếu có
-  off_filtered = df_combo_off_raw.copy()
-  if not off_filtered.empty and effective_thu_list:
-    c_thu_off = find_col(off_filtered, ['Thứ', 'Frequency'])
-    off_filtered = filter_by_thu_multi(off_filtered, c_thu_off, effective_thu_list)
+  def _nma_c(x):
+    s = str(x).strip()
+    return s[:-2] if s.endswith('.0') else s
 
-  off_target_map = {}
-  if not off_filtered.empty:
-    c_nv_off = find_col(off_filtered, ['Tên NV', 'SM name', 'Nhân viên', 'Tên NVBH'])
-    c_ma_off = find_col(off_filtered, ['outlet_code', 'Outlet Code', 'Mã CH'])
-    if c_nv_off and c_ma_off:
-      df_off_sub = off_filtered.copy()
-      df_off_sub['NV'] = df_off_sub[c_nv_off].astype(str).str.strip()
-      df_off_sub['MA'] = df_off_sub[c_ma_off].astype(str).str.strip()
-      off_target_map = df_off_sub.groupby('NV')['MA'].nunique().to_dict()
+  def _combo_ct_by_lich_vt(combo_raw):
+    """CT Combo = số KH trên DS Combo có lịch VT (map MCP Thứ). Không đếm suất."""
+    out = {}
+    if combo_raw is None or getattr(combo_raw, 'empty', True):
+      return out
+    c_nv = find_col(combo_raw, ['Tên NV', 'SM name', 'Nhân viên', 'Tên NVBH', 'SM Name'])
+    c_ma = find_col(combo_raw, ['outlet_code', 'Outlet Code', 'Mã CH', 'Mã KH', 'Outlet_code'])
+    if not (c_nv and c_ma):
+      return out
+    sub = combo_raw.copy()
+    sub['NV'] = sub[c_nv].astype(str).str.strip()
+    sub['MA'] = sub[c_ma].map(_nma_c)
+    c_thu = find_col(sub, ['Thứ', 'Frequency', 'Tần suất'])
+    # Map Thứ từ MCP để lọc theo lịch VT
+    if not mcp_df.empty:
+      c_m_ma = find_col(mcp_df, ['Outlet_code', 'Outlet Code', 'Mã CH', 'Mã KH'])
+      c_m_thu = find_col(mcp_df, ['Thứ', 'Frequency', 'Tần suất'])
+      if c_m_ma and c_m_thu:
+        mcp_thu = mcp_df[[c_m_ma, c_m_thu]].copy()
+        mcp_thu['_ma'] = mcp_thu[c_m_ma].map(_nma_c)
+        thu_map = (
+            mcp_thu.dropna(subset=['_ma'])
+            .drop_duplicates(subset=['_ma'])
+            .set_index('_ma')[c_m_thu].astype(str).str.strip().to_dict()
+        )
+        sub['__thu'] = sub['MA'].map(thu_map)
+        if c_thu is not None:
+          sub['__thu'] = sub['__thu'].fillna(sub[c_thu].astype(str))
+        if effective_thu_list:
+          sub = filter_by_thu_multi(sub, '__thu', effective_thu_list)
+      elif effective_thu_list and c_thu:
+        sub = filter_by_thu_multi(sub, c_thu, effective_thu_list)
+    elif effective_thu_list and c_thu:
+      sub = filter_by_thu_multi(sub, c_thu, effective_thu_list)
+    if sub is None or sub.empty:
+      return out
+    return sub.drop_duplicates(subset=['NV', 'MA']).groupby('NV')['MA'].nunique().to_dict()
 
-  on_filtered = df_combo_on_raw.copy()
-  if not on_filtered.empty and effective_thu_list:
-    c_thu_on = find_col(on_filtered, ['Thứ', 'Frequency'])
-    on_filtered = filter_by_thu_multi(on_filtered, c_thu_on, effective_thu_list)
-
-  on_target_map = {}
-  if not on_filtered.empty:
-    c_nv_on = find_col(on_filtered, ['Tên NV', 'SM name', 'Nhân viên', 'Tên NVBH'])
-    c_ma_on = find_col(on_filtered, ['outlet_code', 'Outlet Code', 'Mã CH'])
-    if c_nv_on and c_ma_on:
-      df_on_sub = on_filtered.copy()
-      df_on_sub['NV'] = df_on_sub[c_nv_on].astype(str).str.strip()
-      df_on_sub['MA'] = df_on_sub[c_ma_on].astype(str).str.strip()
-      on_target_map = df_on_sub.groupby('NV')['MA'].nunique().to_dict()
+  off_target_map = _combo_ct_by_lich_vt(df_combo_off_raw)
+  on_target_map = _combo_ct_by_lich_vt(df_combo_on_raw)
 
   # Actual Combo: CÙNG logic Báo Cáo Combo (tag_combo_orders_t10)
   # Rule T09/T10 theo tháng, kênh map MCP, đếm unique Mã CH trên ĐH combo
   off_actual_dict, on_actual_dict = {}, {}
   try:
-    combo_df = tag_combo_orders_t10(df_mtd, mcp_df=mcp_df)
-    if combo_df is not None and not combo_df.empty and 'Tên NVBH' in combo_df.columns and 'Mã CH' in combo_df.columns:
-      if 'channel' in combo_df.columns:
-        off_sub = combo_df[combo_df['channel'].astype(str).str.upper() == 'OFF']
-        on_sub = combo_df[combo_df['channel'].astype(str).str.upper() == 'ON']
-      else:
-        off_sub = combo_df
-        on_sub = pd.DataFrame()
-      if not off_sub.empty:
-        off_actual_dict = off_sub.groupby('Tên NVBH')['Mã CH'].nunique().to_dict()
-      if not on_sub.empty:
-        on_actual_dict = on_sub.groupby('Tên NVBH')['Mã CH'].nunique().to_dict()
+    # Dùng df_kpi (đã lọc Thứ/CH) nếu có, else full MTD — đếm SỐ CH (unique), không đếm suất
+    _src = df_kpi if df_kpi is not None and not getattr(df_kpi, 'empty', True) else df_mtd
+    combo_df = tag_combo_orders_t10(_src, mcp_df=mcp_df)
+    if combo_df is not None and not combo_df.empty:
+      def _nma_a(x):
+        s = str(x).strip()
+        return s[:-2] if s.endswith('.0') else s
+      c_nv_a = find_col(combo_df, ['Tên NVBH', 'SM Name', 'SM name', 'Tên NV'])
+      c_ma_a = find_col(combo_df, ['Mã CH', 'Outlet_code', 'Outlet Code', 'Mã KH'])
+      if c_nv_a and c_ma_a:
+        c2 = combo_df.copy()
+        c2['_nv'] = c2[c_nv_a].astype(str).str.strip()
+        c2['_ma'] = c2[c_ma_a].map(_nma_a)
+        # Chỉ lấy CH nằm trong DS Combo tương ứng kênh (nếu có)
+        if 'channel' in c2.columns:
+          off_sub = c2[c2['channel'].astype(str).str.upper().str.contains('OFF', na=False)]
+          on_sub = c2[c2['channel'].astype(str).str.upper().str.contains('ON', na=False)
+                      & ~c2['channel'].astype(str).str.upper().str.contains('OFF', na=False)]
+        else:
+          off_sub, on_sub = c2, c2.iloc[0:0]
+        if not off_sub.empty:
+          off_actual_dict = off_sub.drop_duplicates(subset=['_nv', '_ma']).groupby('_nv')['_ma'].nunique().to_dict()
+        if not on_sub.empty:
+          on_actual_dict = on_sub.drop_duplicates(subset=['_nv', '_ma']).groupby('_nv')['_ma'].nunique().to_dict()
   except Exception:
     off_actual_dict, on_actual_dict = {}, {}
 
@@ -7425,12 +7508,20 @@ def build_summary_report(
             'Doanh số nền tảng của OUTLET',
             'Chỉ tiêu của brand',
             'Chỉ tiêu brand',
+            'Chỉ tiêu của CAT/BRAND',
+            'Chỉ tiêu CAT/BRAND',
             'Target',
         ],
     )
     c_mtd_brand = find_col(
         brand_filtered,
-        ['Doanh số thực đạt của brand', 'Doanh số thực đạt brand'],
+        [
+            'Doanh số thực đạt của brand',
+            'Doanh số thực đạt brand',
+            'Doanh số thực đạt của CAT/BRAND',
+            'Doanh số thực đạt của CAT/BRAND',
+            'Doanh số Paid/Invoiced theo từng nhãn hàng',
+        ],
     )
 
     if c_nv_brand and c_ma_brand:
@@ -7472,7 +7563,7 @@ def build_summary_report(
   rows = []
   for nv in nv_list:
     v_tgt = int(vip_target_map.get(nv, 0))
-    v_act = int(vip_actual_map.get(nv, int(v_tgt * 0.9)))
+    v_act = int(vip_actual_map.get(nv, 0))
     v_pct = round(v_act / v_tgt * 100, 1) if v_tgt else 0
 
     off_tgt = int(off_target_map.get(nv, 0))
@@ -7484,7 +7575,7 @@ def build_summary_report(
     on_pct = round(on_act / on_tgt * 100, 1) if on_tgt else 0
 
     cat_tgt = int(cat_target_map.get(nv, 0))
-    cat_act = int(cat_actual_map.get(nv, int(cat_tgt * 0.8)))
+    cat_act = int(cat_actual_map.get(nv, 0))
     cat_pct = round(cat_act / cat_tgt * 100, 1) if cat_tgt else 0
     cat_ct = float(cat_ctds_map.get(nv, 0.0))
     cat_m = float(cat_mtd_map.get(nv, 0.0))
