@@ -11582,7 +11582,7 @@ def build_rpt_sellout_maps(df_rpt, report_date):
   by_nv_cat = d.groupby(['_nv', '_cat'])['_val'].sum().to_dict()
   return by_cat, by_nv_cat
 
-def build_perf_by_month(df_raw, filter_nv=None, n_months=4, df_rpt=None, report_date=None):
+def build_perf_by_month(df_raw, filter_nv=None, n_months=6, df_rpt=None, report_date=None):
   """4 tháng gần nhất: bảng CAT / Target / SellOut / %MTD.
 
   Tháng T (tháng report_date): SellOut lấy từ RPT (DanhSachChiTietDonHang).
@@ -19014,7 +19014,7 @@ if _nav == '📊 BÁO CÁO KPI':
           'Upload lên GitHub rồi **Xóa Cache & Reload**.'
       )
     else:
-      data_by_m, months = build_perf_by_month(df_perf, filter_nv, n_months=4, df_rpt=df, report_date=report_date)
+      data_by_m, months = build_perf_by_month(df_perf, filter_nv, n_months=6, df_rpt=df, report_date=report_date)
       if not months:
         st.info('Không có dữ liệu tháng để hiển thị.')
       else:
