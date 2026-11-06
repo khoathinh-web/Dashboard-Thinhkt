@@ -8847,7 +8847,7 @@ def build_mbs_nv_summary_asof(df_detail, df_rpt, report_date, filter_nv=None):
   """
   cols = [
       'STT', 'Tên NVBH', 'Tổng KH', 'Nhóm 1', '% Đạt',
-      'Nhóm 2', 'Nhóm 3', 'Nhóm 4', 'Nhóm 5', 'Nhóm 6', 'Đạt NV',
+      'Nhóm 2', 'Nhóm 3', 'Nhóm 4', 'Nhóm 5', 'Nhóm 6', 'Đạt NV', '% Đạt NV',
       'Actual', 'Target', '% TH',
   ]
   empty = pd.DataFrame(columns=cols)
@@ -8932,6 +8932,7 @@ def build_mbs_nv_summary_asof(df_detail, df_rpt, report_date, filter_nv=None):
         'Nhóm 5': n5,
         'Nhóm 6': n6,
         'Đạt NV': n_nv,
+        '% Đạt NV': round(n_nv / total * 100, 1) if total else 0.0,
         'Actual': act,
         'Target': tgt,
         '% TH': pct_th,
@@ -8954,6 +8955,7 @@ def build_mbs_nv_summary_asof(df_detail, df_rpt, report_date, filter_nv=None):
       'Nhóm 5': int(out['Nhóm 5'].sum()),
       'Nhóm 6': int(out['Nhóm 6'].sum()),
       'Đạt NV': int(out['Đạt NV'].sum()),
+      '% Đạt NV': round(out['Đạt NV'].sum() / out['Tổng KH'].sum() * 100, 1) if out['Tổng KH'].sum() else 0.0,
       'Actual': float(out['Actual'].sum()),
       'Target': float(out['Target'].sum()),
       '% TH': round(out['Actual'].sum() / out['Target'].sum() * 100, 1) if out['Target'].sum() else 0.0,
@@ -9032,7 +9034,7 @@ def render_mbs_nv_summary_html(df, title='TỔNG HỢP THEO NV — CHỐT ĐẠT
     return ''
   cols = [c for c in [
       'STT', 'Tên NVBH', 'Tổng KH', 'Nhóm 1', '% Đạt',
-      'Nhóm 2', 'Nhóm 3', 'Nhóm 4', 'Nhóm 5', 'Nhóm 6', 'Đạt NV',
+      'Nhóm 2', 'Nhóm 3', 'Nhóm 4', 'Nhóm 5', 'Nhóm 6', 'Đạt NV', '% Đạt NV',
       'Actual', 'Target', '% TH', 'Điểm thưởng DK',
   ] if c in df.columns]
 
@@ -9105,7 +9107,7 @@ def render_mbs_nv_summary_html(df, title='TỔNG HỢP THEO NV — CHỐT ĐẠT
       elif c == 'Tên NVBH':
         sticky = sticky_ten_c
 
-      if c in ('% Đạt', '% TH'):
+      if c in ('% Đạt', '% Đạt NV', '% TH'):
         try:
           v = float(str(raw).replace('%', '').replace(',', '.').strip())
           val_s = f'{v:.1f}%'
@@ -16377,16 +16379,9 @@ nv_list = sorted(
 )
 
 vn_time = dt.datetime.utcnow() + dt.timedelta(hours=7)
+# Mặc định xem báo cáo ngày T-1 (giờ VN)
 _default_t1 = (vn_time - timedelta(days=1)).date()
-# Mặc định theo tháng báo cáo đang chạy: T10/2026
-_REPORT_MONTH_START = date(2026, 10, 1)
-_REPORT_MONTH_END = date(2026, 10, 31)
-if _default_t1 < _REPORT_MONTH_START:
-  default_date_t_minus_1 = _REPORT_MONTH_START
-elif _default_t1 > _REPORT_MONTH_END:
-  default_date_t_minus_1 = _REPORT_MONTH_END
-else:
-  default_date_t_minus_1 = _default_t1
+default_date_t_minus_1 = _default_t1  # sẽ clamp theo tháng báo cáo sau khi chọn tháng
 
 
 def get_timegone_stats(target_date):
@@ -16476,7 +16471,19 @@ if _m == 12:
 else:
   _month_end = date(_y, _m + 1, 1) - timedelta(days=1)
 
-# Ngày báo cáo (lấy từ session để tính Timegone trước khi vẽ filter)
+# Ngày báo cáo mặc định = T-1, clamp trong tháng đang chọn
+if _default_t1 < _month_start:
+  default_date_t_minus_1 = _month_start
+elif _default_t1 > _month_end:
+  default_date_t_minus_1 = _month_end
+else:
+  default_date_t_minus_1 = _default_t1
+
+# Lần đầu / đổi tháng: ưu tiên T-1; giữ lựa chọn user trong tháng
+if 'ngay' not in st.session_state or st.session_state.get('_last_month_for_ngay') != st.session_state.get('report_month_key'):
+  st.session_state['ngay'] = default_date_t_minus_1
+  st.session_state['_last_month_for_ngay'] = st.session_state.get('report_month_key')
+
 report_date = st.session_state.get('ngay', default_date_t_minus_1)
 if not isinstance(report_date, date):
   try:
@@ -16487,7 +16494,7 @@ if not isinstance(report_date, date):
 if report_date < _month_start:
   report_date = _month_start
 elif report_date > _month_end:
-  report_date = min(_month_end, default_date_t_minus_1) if default_date_t_minus_1 >= _month_start else _month_end
+  report_date = default_date_t_minus_1
 st.session_state['ngay'] = report_date
 
 _refresh_paths()
@@ -16538,6 +16545,7 @@ with f1:
   st.markdown('<p class="filter-label">NGÀY</p>', unsafe_allow_html=True)
   report_date = st.date_input(
       '',
+      value=st.session_state.get('ngay', default_date_t_minus_1),
       min_value=_month_start,
       max_value=_month_end,
       key='ngay',
