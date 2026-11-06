@@ -8846,8 +8846,9 @@ def build_mbs_nv_summary_asof(df_detail, df_rpt, report_date, filter_nv=None):
   phân lại 6 nhóm rồi aggregate theo NV.
   """
   cols = [
-      'STT', 'Tên NVBH', 'Tổng KH', 'KH Đạt (N1)', '% Đạt',
-      'KH N2', 'KH N5', 'Actual', 'Target', '% TH',
+      'STT', 'Tên NVBH', 'Tổng KH', 'Nhóm 1', '% Đạt',
+      'Nhóm 2', 'Nhóm 3', 'Nhóm 4', 'Nhóm 5', 'Nhóm 6', 'Đạt NV',
+      'Actual', 'Target', '% TH',
   ]
   empty = pd.DataFrame(columns=cols)
   if df_detail is None or df_detail.empty:
@@ -8899,6 +8900,7 @@ def build_mbs_nv_summary_asof(df_detail, df_rpt, report_date, filter_nv=None):
         'Actual': actual,
         'Target': target,
         'Nhóm': nhom,
+        'Mission': bool(mission),
         'Điểm thưởng DK': round(actual * rate / 100),
     })
   d = pd.DataFrame(rows)
@@ -8910,39 +8912,54 @@ def build_mbs_nv_summary_asof(df_detail, df_rpt, report_date, filter_nv=None):
     total = len(g)
     n1 = int((g['Nhóm'] == 1).sum())
     n2 = int((g['Nhóm'] == 2).sum())
-    n5 = int((g['Nhóm'] == (6 if t11 else 5)).sum())  # KH chưa phát sinh DS
+    n3 = int((g['Nhóm'] == 3).sum())
+    n4 = int((g['Nhóm'] == 4).sum())
+    n5 = int((g['Nhóm'] == 5).sum())
+    n6 = int((g['Nhóm'] == 6).sum())
+    n_nv = int(g['Mission'].sum())  # số CH đã đạt Nhiệm Vụ
     act = float(g['Actual'].sum())
     tgt = float(g['Target'].sum())
     pct_dat = round(n1 / total * 100, 1) if total else 0.0
     pct_th = round(act / tgt * 100, 1) if tgt > 0 else 0.0
-    out_rows.append({
+    row = {
         'Tên NVBH': nv,
         'Tổng KH': total,
-        'KH Đạt (N1)': n1,
+        'Nhóm 1': n1,
         '% Đạt': pct_dat,
-        'KH N2': n2,
-        ('KH N6' if t11 else 'KH N5'): n5,
+        'Nhóm 2': n2,
+        'Nhóm 3': n3,
+        'Nhóm 4': n4,
+        'Nhóm 5': n5,
+        'Nhóm 6': n6,
+        'Đạt NV': n_nv,
         'Actual': act,
         'Target': tgt,
         '% TH': pct_th,
-        **({'Điểm thưởng DK': float(g['Điểm thưởng DK'].sum())} if t11 else {}),
-    })
-  out = pd.DataFrame(out_rows).sort_values('KH Đạt (N1)', ascending=False).reset_index(drop=True)
+    }
+    if t11:
+      row['Điểm thưởng DK'] = float(g['Điểm thưởng DK'].sum())
+    out_rows.append(row)
+  out = pd.DataFrame(out_rows).sort_values('Nhóm 1', ascending=False).reset_index(drop=True)
   out.insert(0, 'STT', range(1, len(out) + 1))
   # Dòng tổng
   tot = {
       'STT': '',
       'Tên NVBH': 'TỔNG CỘNG',
       'Tổng KH': int(out['Tổng KH'].sum()),
-      'KH Đạt (N1)': int(out['KH Đạt (N1)'].sum()),
-      '% Đạt': round(out['KH Đạt (N1)'].sum() / out['Tổng KH'].sum() * 100, 1) if out['Tổng KH'].sum() else 0.0,
-      'KH N2': int(out['KH N2'].sum()),
-      ('KH N6' if t11 else 'KH N5'): int(out['KH N6' if t11 else 'KH N5'].sum()),
+      'Nhóm 1': int(out['Nhóm 1'].sum()),
+      '% Đạt': round(out['Nhóm 1'].sum() / out['Tổng KH'].sum() * 100, 1) if out['Tổng KH'].sum() else 0.0,
+      'Nhóm 2': int(out['Nhóm 2'].sum()),
+      'Nhóm 3': int(out['Nhóm 3'].sum()),
+      'Nhóm 4': int(out['Nhóm 4'].sum()),
+      'Nhóm 5': int(out['Nhóm 5'].sum()),
+      'Nhóm 6': int(out['Nhóm 6'].sum()),
+      'Đạt NV': int(out['Đạt NV'].sum()),
       'Actual': float(out['Actual'].sum()),
       'Target': float(out['Target'].sum()),
       '% TH': round(out['Actual'].sum() / out['Target'].sum() * 100, 1) if out['Target'].sum() else 0.0,
-      **({'Điểm thưởng DK': float(out['Điểm thưởng DK'].sum())} if t11 else {}),
   }
+  if t11 and 'Điểm thưởng DK' in out.columns:
+    tot['Điểm thưởng DK'] = float(out['Điểm thưởng DK'].sum())
   out = pd.concat([out, pd.DataFrame([tot])], ignore_index=True)
   return out
 
@@ -9014,8 +9031,9 @@ def render_mbs_nv_summary_html(df, title='TỔNG HỢP THEO NV — CHỐT ĐẠT
   if df is None or df.empty:
     return ''
   cols = [c for c in [
-      'STT', 'Tên NVBH', 'Tổng KH', 'KH Đạt (N1)', '% Đạt',
-      'KH N2', 'KH N5', 'KH N6', 'Actual', 'Target', '% TH', 'Điểm thưởng DK',
+      'STT', 'Tên NVBH', 'Tổng KH', 'Nhóm 1', '% Đạt',
+      'Nhóm 2', 'Nhóm 3', 'Nhóm 4', 'Nhóm 5', 'Nhóm 6', 'Đạt NV',
+      'Actual', 'Target', '% TH', 'Điểm thưởng DK',
   ] if c in df.columns]
 
   max_name = 12
@@ -17562,7 +17580,7 @@ if _nav == '📊 BÁO CÁO KPI':
             st.caption(
                 'Actual = Doanh số RPT từ đầu tháng → ngày BC | '
                 'Target & Nhiệm vụ lấy từ Data_Cat | '
-                'KH Đạt (N1) = Actual ≥ Target và đạt nhiệm vụ'
+                'Nhóm 1 = Actual ≥ Target và đạt nhiệm vụ'
             )
         except Exception as _e_mbs_nv:
           st.warning(f'Không dựng được bảng tổng hợp NV MBS CAT: {_e_mbs_nv}')
@@ -17876,10 +17894,10 @@ if _nav == '📊 BÁO CÁO KPI':
             st.caption(
                 'Actual = Doanh số RPT từ đầu tháng → ngày BC | '
                 'Target & Nhiệm vụ lấy từ Data_Brand | '
-                + ('KH Đạt (N1) = Actual ≥ 95% Target và đạt nhiệm vụ | '
+                + ('Nhóm 1 = Actual ≥ 95% Target và đạt nhiệm vụ | '
                    'Điểm thưởng DK = 1,2% / 1,5% / 2% Actual (đạt 95% / 100% / 105%)'
                    if 'Mức đạt' in df_detail.columns else
-                   'KH Đạt (N1) = Actual ≥ Target và đạt nhiệm vụ')
+                   'Nhóm 1 = Actual ≥ Target và đạt nhiệm vụ')
             )
         except Exception as _e_mbs_nv:
           st.warning(f'Không dựng được bảng tổng hợp NV {_bn}: {_e_mbs_nv}')
